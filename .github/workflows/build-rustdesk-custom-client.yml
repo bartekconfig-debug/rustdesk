@@ -127,11 +127,19 @@ jobs:
           curl -L https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll -o target/debug/sciter.dll
 
       - name: Build release client
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          export VCPKG_ROOT=/c/vcpkg
-          export LIBCLANG_PATH="/c/Program Files/LLVM/bin"
+          $env:VCPKG_ROOT = "C:\vcpkg"
+          $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+          $vsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $vsWhere)) {
+            throw "Nie znaleziono vswhere.exe potrzebnego do odszukania linkera MSVC."
+          }
+          $msvcLinker = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find "**\Hostx64\x64\link.exe" | Select-Object -First 1
+          if (-not $msvcLinker) {
+            throw "Nie znaleziono link.exe z Visual Studio Build Tools."
+          }
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = $msvcLinker
           cargo build --release
 
       - name: Prepare artifact payload
