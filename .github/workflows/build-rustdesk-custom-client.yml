@@ -92,8 +92,15 @@ jobs:
       - name: Install LLVM
         shell: pwsh
         run: |
-          choco install llvm --version=15.0.2 -y --no-progress
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          $clangPath = Join-Path $llvmBin "clang.exe"
+          if (-not (Test-Path -LiteralPath $clangPath)) {
+            choco install llvm -y --no-progress
+          }
+          if (-not (Test-Path -LiteralPath $clangPath)) {
+            throw "Nie znaleziono clang.exe po instalacji LLVM."
+          }
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Bootstrap vcpkg and install RustDesk dependencies
         shell: bash
