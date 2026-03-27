@@ -1,0 +1,154 @@
+name: Build RustDesk Custom Client
+
+on:
+  workflow_dispatch:
+    inputs:
+      rendezvous_server:
+        description: "RustDesk self-host server"
+        required: false
+        type: string
+      rs_pub_key:
+        description: "Public key from rustdesk-server"
+        required: false
+        type: string
+      api_server:
+        description: "Optional API server URL"
+        required: false
+        type: string
+      artifact_name:
+        description: "Name of uploaded artifact"
+        required: false
+        default: "rustdesk-custom-client-windows"
+        type: string
+      client_label:
+        description: "Short label used in artifact file names"
+        required: false
+        default: "desk-itpe-pl"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-custom-client:
+    name: Build Windows custom client
+    runs-on: windows-latest
+    env:
+      RENDEZVOUS_SERVER: ${{ github.event.inputs.rendezvous_server || secrets.RENDEZVOUS_SERVER }}
+      RS_PUB_KEY: ${{ github.event.inputs.rs_pub_key || secrets.RS_PUB_KEY }}
+      API_SERVER: ${{ github.event.inputs.api_server || secrets.API_SERVER }}
+      ARTIFACT_NAME: ${{ github.event.inputs.artifact_name || 'rustdesk-custom-client-windows' }}
+      CLIENT_LABEL: ${{ github.event.inputs.client_label || 'desk-itpe-pl' }}
+
+    steps:
+      - name: Validate self-host settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RENDEZVOUS_SERVER:-}" ]; then
+            echo "RENDEZVOUS_SERVER is empty." >&2
+            exit 1
+          fi
+          if [ -z "${RS_PUB_KEY:-}" ]; then
+            echo "RS_PUB_KEY is empty." >&2
+            exit 1
+          fi
+          printf 'Building RustDesk for %s\n' "$RENDEZVOUS_SERVER"
+
+      - name: Checkout RustDesk fork with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Restore cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\bin
+            ~\.cargo\registry\cache
+            ~\.cargo\registry\index
+            ~\.cargo\git\db
+            target
+          key: ${{ runner.os }}-cargo-rustdesk-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-rustdesk-
+
+      - name: Restore vcpkg cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg
+            C:\Users\runneradmin\AppData\Local\vcpkg\archives
+          key: ${{ runner.os }}-vcpkg-rustdesk-v1
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install LLVM
+        shell: pwsh
+        run: |
+          choco install llvm --version=15.0.2 -y --no-progress
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Bootstrap vcpkg and install RustDesk dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /c
+          if [ ! -d vcpkg/.git ]; then
+            git clone https://github.com/microsoft/vcpkg vcpkg
+          fi
+          cd vcpkg
+          git fetch --tags --force
+          git checkout 2023.04.15
+          ./bootstrap-vcpkg.bat
+          export VCPKG_ROOT=/c/vcpkg
+          ./vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+          echo "VCPKG_ROOT=C:\vcpkg" >> "$GITHUB_ENV"
+
+      - name: Download sciter.dll
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/debug
+          curl -L https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll -o target/debug/sciter.dll
+
+      - name: Build release client
+        shell: bash
+        run: |
+          set -euo pipefail
+          export VCPKG_ROOT=/c/vcpkg
+          export LIBCLANG_PATH="/c/Program Files/LLVM/bin"
+          cargo build --release
+
+      - name: Prepare artifact payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f target/release/rustdesk.exe ]; then
+            echo "target/release/rustdesk.exe not found after build." >&2
+            exit 1
+          fi
+          label="$(printf '%s' "${CLIENT_LABEL:-custom}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')"
+          mkdir -p dist
+          cp target/release/rustdesk.exe "dist/rustdesk-${label}.exe"
+          cp target/debug/sciter.dll dist/sciter.dll
+          {
+            echo "RENDEZVOUS_SERVER=${RENDEZVOUS_SERVER}"
+            echo "RS_PUB_KEY=${RS_PUB_KEY}"
+            echo "API_SERVER=${API_SERVER}"
+            echo "CLIENT_LABEL=${CLIENT_LABEL}"
+            echo "GITHUB_SHA=${GITHUB_SHA}"
+          } > dist/build-info.txt
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: dist/*
+          if-no-files-found: error
