@@ -65,6 +65,26 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Prepare Python shims for build.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .github/shims
+          cat > .github/shims/python3.cmd <<'EOF'
+          @echo off
+          python %*
+          EOF
+          cat > .github/shims/pip3.cmd <<'EOF'
+          @echo off
+          pip %*
+          EOF
+          printf '%s\n' "$PWD/.github/shims" >> "$GITHUB_PATH"
+
       - name: Restore cargo cache
         uses: actions/cache@v4
         with:
@@ -123,14 +143,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p target/debug
+          mkdir -p target/debug target/release
           curl -L https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll -o target/debug/sciter.dll
+          cp target/debug/sciter.dll target/release/sciter.dll
 
-      - name: Build release client
+      - name: Resolve MSVC linker
         shell: pwsh
         run: |
-          $env:VCPKG_ROOT = "C:\vcpkg"
-          $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
           $vsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
           if (-not (Test-Path -LiteralPath $vsWhere)) {
             throw "Nie znaleziono vswhere.exe potrzebnego do odszukania linkera MSVC."
@@ -139,27 +158,67 @@ jobs:
           if (-not $msvcLinker) {
             throw "Nie znaleziono link.exe z Visual Studio Build Tools."
           }
-          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = $msvcLinker
-          cargo build --release
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$msvcLinker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build packaged desktop client
+        shell: bash
+        run: |
+          set -euo pipefail
+          python build.py
 
       - name: Prepare artifact payload
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f target/release/rustdesk.exe ]; then
-            echo "target/release/rustdesk.exe not found after build." >&2
-            exit 1
-          fi
           label="$(printf '%s' "${CLIENT_LABEL:-custom}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-')"
           mkdir -p dist
-          cp target/release/rustdesk.exe "dist/rustdesk-${label}.exe"
-          cp target/debug/sciter.dll dist/sciter.dll
+
+          exe_candidate=""
+          for candidate in resources/RustDesk.exe target/release/RustDesk.exe target/release/rustdesk.exe; do
+            if [ -f "$candidate" ]; then
+              exe_candidate="$candidate"
+              break
+            fi
+          done
+          if [ -z "$exe_candidate" ]; then
+            echo "Nie znaleziono zbudowanego RustDesk.exe po uruchomieniu build.py." >&2
+            exit 1
+          fi
+
+          sciter_candidate=""
+          for candidate in resources/sciter.dll target/release/sciter.dll target/debug/sciter.dll; do
+            if [ -f "$candidate" ]; then
+              sciter_candidate="$candidate"
+              break
+            fi
+          done
+
+          ui_source=""
+          if [ -d resources/ui ]; then
+            ui_source="resources/ui"
+          elif [ -d src/ui ]; then
+            ui_source="src/ui"
+          fi
+
+          cp "$exe_candidate" "dist/rustdesk-${label}.exe"
+          if [ -n "$sciter_candidate" ]; then
+            cp "$sciter_candidate" dist/sciter.dll
+          fi
+          if [ -n "$ui_source" ]; then
+            mkdir -p dist/ui
+            cp -R "$ui_source"/. dist/ui/
+          fi
+
           {
+            echo "BUILDER=python build.py"
             echo "RENDEZVOUS_SERVER=${RENDEZVOUS_SERVER}"
             echo "RS_PUB_KEY=${RS_PUB_KEY}"
             echo "API_SERVER=${API_SERVER}"
             echo "CLIENT_LABEL=${CLIENT_LABEL}"
             echo "GITHUB_SHA=${GITHUB_SHA}"
+            echo "EXE_SOURCE=${exe_candidate}"
+            echo "SCITER_SOURCE=${sciter_candidate}"
+            echo "UI_SOURCE=${ui_source}"
           } > dist/build-info.txt
 
       - name: Upload Windows artifact
